@@ -1,33 +1,34 @@
 package logic
 
 import (
-	"crypto/rand"
+	"fmt"
+	"os"
 	"time"
 
+	mqtt "github.com/eclipse/paho.mqtt.golang"
 	serialization "github.com/richiMarchi/latency-tester/latency-tester-mqtt/pkg/message/serialization/protobuf"
 
-	mqtt "github.com/eclipse/paho.mqtt.golang"
 	"google.golang.org/protobuf/proto"
-	"google.golang.org/protobuf/types/known/timestamppb"
 	"k8s.io/klog/v2"
 )
 
 type ServerSubscriber struct {
 	client  mqtt.Client
 	qos     byte
-	payload []byte
+	output  *os.File
 }
 
-func NewServerSubscriber(client mqtt.Client, responseSize uint, qos byte) *ServerSubscriber {
-	payload := make([]byte, responseSize)
-	if _, err := rand.Read(payload); err != nil {
-		klog.Fatal("Failed to build payload", err)
+func NewServerSubscriber(client mqtt.Client, qos byte, outputFile string) *ServerSubscriber {
+	file, err := os.Create(outputFile)
+	if err != nil {
+		klog.Fatal("Failed to open output file: ", err)
 	}
+	_, _ = file.WriteString("client-send-timestamp,msg-latency-ms\n")
 
 	return &ServerSubscriber{
 		client:  client,
 		qos:     qos,
-		payload: payload,
+		output:  file,
 	}
 }
 
@@ -45,25 +46,14 @@ func (s *ServerSubscriber) onMessage(client mqtt.Client, msg mqtt.Message) {
 		klog.Errorf("Failed to unmarshal message: %v", err)
 	}
 
-	klog.Infof("Received message with ID %v", request.Id)
-	s.publishResponse(request)
-}
+	// Save the response
+	latency := time.Since(request.ClientTimestamp.AsTime())
+	latencyMs := float64(latency.Nanoseconds()) / float64(time.Millisecond.Nanoseconds())
 
-func (s *ServerSubscriber) publishResponse(response *serialization.Message) {
-	response.ServerTimestamp = timestamppb.Now()
-	response.Payload = s.payload
+	klog.Infof("Received message %d in %.2f ms", request.Id, latencyMs)
 
-	marshal, err := proto.Marshal(response)
-	if err != nil {
-		klog.Errorf("Failed to marshal message: %v", err)
-	}
-
-	token := s.client.Publish(ResponseTopic, s.qos, false, marshal)
-	go func(id uint, start time.Time) {
-		<-token.Done()
-		klog.V(3).Infof("Confirmed publication of message %v in %v", id, time.Since(start))
-		if token.Error() != nil {
-			klog.Error("Failed to publish message %v: ", id, token.Error())
-		}
-	}(uint(response.Id), time.Now())
+	outputStr := fmt.Sprintf("%v,%f\n",
+		request.ClientTimestamp.AsTime().UnixNano(),
+		latencyMs)
+	_, _ = s.output.WriteString(outputStr)
 }

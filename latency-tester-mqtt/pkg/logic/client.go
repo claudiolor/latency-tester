@@ -2,7 +2,6 @@ package logic
 
 import (
 	"crypto/rand"
-	"fmt"
 	"os"
 	"time"
 
@@ -16,74 +15,55 @@ import (
 
 type ClientRequester struct {
 	client           mqtt.Client
-	currentMessageID uint
-	repetitions      uint
-	intervalMs       uint
-	qos              byte
-	payload          []byte
+	currentMessageID   uint
+	messageRate        uint
+	experimentDuration time.Duration
+	qos                byte
+	payload            []byte
 
 	shutdown chan os.Signal
 }
 
-type ClientSubscriber struct {
-	client      mqtt.Client
-	output      *os.File
-	repetitions uint
-	qos         byte
-	received    uint
-
-	shutdown chan os.Signal
-}
-
-func NewClientRequester(client mqtt.Client, repetitions, interval, requestSize uint, qos byte, shutdown chan os.Signal) *ClientRequester {
+func NewClientRequester(client mqtt.Client, messageRate uint, experimentDuration uint, requestSize uint,
+						qos byte, shutdown chan os.Signal) *ClientRequester {
 	payload := make([]byte, requestSize)
 	if _, err := rand.Read(payload); err != nil {
 		klog.Fatal("Failed to build payload", err)
 	}
 
 	return &ClientRequester{
-		client:           client,
-		currentMessageID: 0,
-		repetitions:      repetitions,
-		intervalMs:       interval,
-		payload:          payload,
-		qos:              qos,
-		shutdown:         shutdown,
+		client:             client,
+		currentMessageID:   0,
+		messageRate: 	    messageRate,
+		experimentDuration: time.Duration(experimentDuration) * time.Second,
+		payload:            payload,
+		qos:                qos,
+		shutdown:           shutdown,
 	}
 }
 
-func NewClientSubscriber(client mqtt.Client, outputFile string, repetitions uint, qos byte, shutdown chan os.Signal) *ClientSubscriber {
-	file, err := os.Create(outputFile)
-	if err != nil {
-		klog.Fatal("Failed to open output file: ", err)
-	}
-	_, _ = file.WriteString("client-send-timestamp,server-timestamp,e2e-rtt\n")
-
-	return &ClientSubscriber{
-		client:      client,
-		output:      file,
-		repetitions: repetitions,
-		received:    0,
-		qos:         qos,
-		shutdown:    shutdown,
-	}
+func (r *ClientRequester) WorkOutRate(currentRate uint) time.Duration{
+	return time.Duration(uint(1 / float32(currentRate) * 1000000)) * time.Microsecond
 }
 
 func (r *ClientRequester) PublishRequests() {
 	klog.Infof("Starting to publish requests on %s", RequestTopic)
-	for r.currentMessageID = 0; r.currentMessageID < r.repetitions; r.currentMessageID++ {
+	currentRate := r.messageRate
+	intervalNs := r.WorkOutRate(currentRate)
+	experimentStart := time.Now()
+	klog.Infof("Start publishing with rate %v", intervalNs)
+	klog.Infof("Experiment will last %v", r.experimentDuration)
+	for r.experimentDuration == 0 || time.Since(experimentStart) <  r.experimentDuration{
 		start := time.Now()
 		r.publishRequest(&start)
 
-		waitTime := time.Millisecond*time.Duration(r.intervalMs) - time.Since(start)
+		waitTime := intervalNs - time.Since(start)
 		if waitTime < 0 {
-			klog.Warningf("Missed deadline when sending message %v", r.currentMessageID)
+			klog.Warningf("Missed deadline when sending message %v %v interval %v since start", r.currentMessageID, intervalNs, time.Since(start))
 			waitTime = 0
 		}
 
-		if r.currentMessageID == r.repetitions-1 {
-			break
-		}
+		r.currentMessageID++
 
 		select {
 		case signal := <-r.shutdown:
@@ -117,40 +97,4 @@ func (r *ClientRequester) publishRequest(now *time.Time) {
 			klog.Error("Failed to publish message %v: ", id, token.Error())
 		}
 	}(r.currentMessageID)
-}
-
-func (s *ClientSubscriber) Subscribe() {
-	klog.Infof("Subscribing to topic: %s", ResponseTopic)
-	token := s.client.Subscribe(ResponseTopic, s.qos, s.onMessage)
-	token.Wait()
-	klog.Infof("Subscribed to topic: %s", ResponseTopic)
-}
-
-func (s *ClientSubscriber) Cleanup() {
-	s.output.Close()
-}
-
-func (s *ClientSubscriber) onMessage(client mqtt.Client, msg mqtt.Message) {
-	response := &serialization.Message{}
-	err := proto.Unmarshal(msg.Payload(), response)
-	if err != nil {
-		klog.Errorf("Failed to unmarshal message: %v", err)
-	}
-
-	latency := time.Since(response.ClientTimestamp.AsTime())
-	latencyMs := float64(latency.Nanoseconds()) / float64(time.Millisecond.Nanoseconds())
-
-	klog.Infof("Received message %d in %.2f ms", response.Id, latencyMs)
-
-	outputStr := fmt.Sprintf("%v,%v,%f\n",
-		response.ClientTimestamp.AsTime().UnixNano(),
-		response.ServerTimestamp.AsTime().UnixNano(),
-		latencyMs)
-	_, _ = s.output.WriteString(outputStr)
-
-	s.received += 1
-	if s.received == s.repetitions {
-		klog.Infof("All responses received")
-		s.shutdown <- os.Interrupt
-	}
 }

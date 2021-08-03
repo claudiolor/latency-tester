@@ -16,13 +16,12 @@ func main() {
 	broker := flag.String("broker", "", "The address to contact the broker")
 	username := flag.String("username", "", "The broker username")
 	password := flag.String("password", "", "The broker password")
-	responseSize := flag.Uint("responseSize", 1024, "bytes of the payload")
 	qos := flag.Uint("qos", 0, "mqtt QoS")
+	log := flag.String("log", "./log.csv", "file to store latency results")
 	klog.InitFlags(nil)
 	flag.Parse()
 
 	klog.Infof("Broker: %v", *broker)
-	klog.Infof("Response Size: %v Bytes", *responseSize)
 	klog.Infof("QoS: %v", byte(*qos))
 
 	logic.ConfigureLogging()
@@ -33,7 +32,7 @@ func main() {
 		klog.Fatal(err)
 	}
 
-	subscriber := logic.NewServerSubscriber(client, *responseSize, byte(*qos))
+	subscriber := logic.NewServerSubscriber(client, byte(*qos), *log)
 	subscriber.Subscribe()
 
 	shutdown := make(chan os.Signal, 1)
