@@ -2,9 +2,12 @@ package main
 
 import (
 	"flag"
+	"fmt"
+	"math/rand"
 	"os"
 	"os/signal"
 	"syscall"
+	"time"
 
 	"github.com/richiMarchi/latency-tester/latency-tester-mqtt/pkg/logic"
 	"k8s.io/klog/v2"
@@ -21,12 +24,17 @@ func main() {
 	klog.InitFlags(nil)
 	flag.Parse()
 
+	// Generate client id
+	rand.Seed(time.Now().UnixNano())
+	clientId := fmt.Sprintf("%v-%d", id, rand.Int())
+
+	klog.Infof("Client id: %v", clientId)
 	klog.Infof("Broker: %v", *broker)
 	klog.Infof("QoS: %v", byte(*qos))
 
 	logic.ConfigureLogging()
 
-	opts := logic.BuildCommonConnectionOptions(*broker, id, *username, *password)
+	opts := logic.BuildCommonConnectionOptions(*broker, clientId, *username, *password)
 	client, err := logic.EstablishBrokerConnection(opts)
 	if err != nil {
 		klog.Fatal(err)
